@@ -1,0 +1,65 @@
+name: Auto Build (sync upstream)
+
+# Polls upstream optiscaler/OptiScaler, rebases this single auto-build commit
+# onto the latest upstream commit, then builds it (unsigned). No secrets needed:
+# the built-in GITHUB_TOKEN can push to this fork, and the build runs in the same
+# job so it never needs to trigger a second workflow.
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every 6h; tighten/loosen to taste
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  auto-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: true
+
+      - name: Sync fork onto latest upstream
+        id: sync
+        shell: bash
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/optiscaler/OptiScaler.git 2>/dev/null || true
+          git fetch upstream master
+          base=$(git merge-base HEAD upstream/master)
+          tip=$(git rev-parse upstream/master)
+          if [ "$base" = "$tip" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "Already building latest upstream ($tip); nothing to do."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git rebase "$tip"
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          git push --force-with-lease origin HEAD:master
+          echo "build=true" >> "$GITHUB_OUTPUT"
+
+      - name: Add MSBuild to PATH
+        if: steps.sync.outputs.build == 'true'
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build
+        if: steps.sync.outputs.build == 'true'
+        run: msbuild /m /p:Configuration=Release OptiScaler.sln /verbosity:minimal
+
+      - name: Package
+        if: steps.sync.outputs.build == 'true'
+        shell: bash
+        run: 7z a -r "OptiScaler-auto-$(git rev-parse --short HEAD).7z" "x64/Release/a/*"
+
+      - uses: actions/upload-artifact@v7.0.0
+        if: steps.sync.outputs.build == 'true'
+        with:
+          name: OptiScaler-auto
+          path: '*.7z'
+          if-no-files-found: error
